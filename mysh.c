@@ -1,9 +1,12 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <string.h>
-#include <limits.h>
+#include <linux/limits.h>
 
 #include "ArrayList.h"
 #include "mysh.h"
@@ -101,33 +104,69 @@ int parse_command(char * command, int strlen) {
 	if (strlen == 0) {
 		return 0;	
 	}
+
 	arraylist_t * args = to_arraylist(command, strlen);
 	int arr_len = al_length(args);
 
-	if (arr_len > 0) {
-		if (strcmp(args->data[0], "exit") == 0) {
-			if (arr_len > 2) {
-				for (int i = 1; i < arr_len - 1; i++) {
-					// only print spaces while we aren't at the last arg
-					if (i != arr_len - 1) {
-						printf("%s ", args->data[i]);
-						fflush(stdout);
-					}
-					// otherwise just don't print a space
-					else {
-						printf("%s", args->data[i]);
-						fflush(stdout);
-					}
-				}
-				printf("\n");
-			}
-			return 1;
+	if (DEBUG) {
+		printf("printing arraylist\n");
+		for (int i = 0; i < arr_len; i++) {
+			printf("string: %s\n", (args)->data[i]);
 		}
+	}
+
+	if (strcmp(args->data[0], "exit") == 0) {
+		if (arr_len > 2) {
+			for (int i = 1; i < arr_len - 1; i++) {
+				// only print spaces while we aren't at the last arg
+				if (i != arr_len - 1) {
+					printf("%s ", args->data[i]);
+					fflush(stdout);
+				}
+				// otherwise just don't print a space
+				else {
+					printf("%s", args->data[i]);
+					fflush(stdout);
+				}
+			}
+			printf("\n");
+		}
+		printf("current process id %d\n", getpid());
+		if (DEBUG) {printf("returning 1 from parse_command, exiting\n");}
+		return 1;
+	}
+
+	if (check_if_builtin(args->data[0]) > 0) {
+		int res = check_if_builtin(args->data[0]);
+		if (res == 1) {
+			if (arr_len != 3) {
+				printf("Error, incorrect number of commands");
+			}
+			int res = chdir(args->data[1]);
+			if (res < 0) {
+				printf("Error: %s\n", strerror(errno));
+			}
+		}
+		else if (res == 2) {
+			char curr_dir[PATH_MAX + 1];
+			printf("%s\n", getcwd(curr_dir, sizeof(curr_dir)));
+			fflush(stdout);
+		}
+		else {
+			// implement which		
+			char * cmd_path = check_paths(args->data[1]);
+			if (cmd_path != NULL) {
+				printf("%s\n", cmd_path);
+				fflush(stdout);
+			}
+		}
+	}
+	else {
 
 		int status;
-		int pid = fork();
-
-		if (pid == 0) {
+		int child_pid;
+		if ((child_pid = fork()) == 0) {
+			printf("in child\n");
 			if (DEBUG) {
 				printf("in child\n");
 				printf("parsing %s\n", args->data[0]);
@@ -147,49 +186,100 @@ int parse_command(char * command, int strlen) {
 			}
 
 			if (contains_slash(args->data[0])) {
-				execv(args->data[0], (args->data) + 1);
+				execv(args->data[0], args->data);
 			}
 			// add a check to see if the command is cd, pwd, etc.
-			else if (check_if_builtin(args->data[0]) > 0) {
-				int res = check_if_builtin(args->data[0]);
-				if (res == 1) {
-					if (arr_len != 3) {
-						printf("Error, incorrect number of commands");
-					}
-					int res = chdir(args->data[1]);
-					if (res < 0) {
-						printf("Error, chdir failed");
-					}
-				}
-				else if (res == 2) {
-					char curr_dir[PATH_MAX + 1];
-					printf("%s\n", getcwd(curr_dir, sizeof(curr_dir)));
-					fflush(stdout);
-				}
-				else {
-					// implement which		
-					char * cmd_path = check_paths(args->data[1]);
-					if (cmd_path != NULL) {
-						printf("%s\n", cmd_path);
-						fflush(stdout);
-					}
-				}
-			}
 			else {
 				// the 3 dirs that we want to search
 				char * cmd_path = check_paths(args->data[0]);
 				if (DEBUG) {printf("executing %s\n", cmd_path);}
+				printf("command found at %s\n", cmd_path);
 				if (cmd_path != NULL) {
 					char * tmp = args->data[0];
 					args->data[0] = cmd_path;
 					execv(cmd_path, args->data);
 					args->data[0] = tmp;
 				}
+				else {
+					printf("Command not found, exiting\n");
+					exit(0);
+				}
 				free(cmd_path);
 			}
+			//exit(0);
 		}
+
 		wait(&status);
+		
 	}
+
+	/*
+	int status;
+	int child_pid;
+	if ((child_pid = fork()) == 0) {
+		if (DEBUG) {
+			printf("in child\n");
+			printf("parsing %s\n", args->data[0]);
+			printf("contains a slash: %d\n", contains_slash(args->data[0]));
+			printf("is builtin: %d\n", check_if_builtin(args->data[0]));
+			printf("length of arg list: %d\n", arr_len);
+
+			printf("printing arraylist\n");
+			for (int i = 0; i < arr_len; i++) {
+				printf("string: %s\n", (args)->data[i]);
+			}
+
+			printf("printing arraylist args\n");
+			for (int i = 0; i < arr_len - 1; i++) {
+				printf("string :%s\n", ((args->data) + 1)[i]);
+			}
+		}
+
+		if (contains_slash(args->data[0])) {
+			execv(args->data[0], (args->data) + 1);
+			exit(0);
+		}
+		// add a check to see if the command is cd, pwd, etc.
+		else if (check_if_builtin(args->data[0]) > 0) {
+			int res = check_if_builtin(args->data[0]);
+			if (res == 1) {
+				if (arr_len != 3) {
+					printf("Error, incorrect number of commands");
+				}
+				int res = chdir(args->data[1]);
+				if (res < 0) {
+					printf("Error: %s\n", strerror(errno));
+				}
+			}
+			else if (res == 2) {
+				char curr_dir[PATH_MAX + 1];
+				printf("%s\n", getcwd(curr_dir, sizeof(curr_dir)));
+				fflush(stdout);
+			}
+			else {
+				// implement which		
+				char * cmd_path = check_paths(args->data[1]);
+				if (cmd_path != NULL) {
+					printf("%s\n", cmd_path);
+					fflush(stdout);
+				}
+			}
+		}
+		else {
+			// the 3 dirs that we want to search
+			char * cmd_path = check_paths(args->data[0]);
+			if (DEBUG) {printf("executing %s\n", cmd_path);}
+			if (cmd_path != NULL) {
+				char * tmp = args->data[0];
+				args->data[0] = cmd_path;
+				execv(cmd_path, args->data);
+				args->data[0] = tmp;
+			}
+			free(cmd_path);
+		}
+		//exit(0);
+	}
+	*/
 	al_destroy(args);
 	return 0;
 }
@@ -347,14 +437,13 @@ void run_batch_mode() {
 // and then run the input loop as part of this main loop
 void run_interactive_mode() {
 	printf("Welcome to my shell!\n");
-	while (1) {
+	int res = 0;
+	while (res == 0) {
 		printf("mysh> ");
 		fflush(stdout);
 		char * command = read_input(STDIN_FILENO, 1);
-		int res = parse_command(command, strlen(command));
-		if (res == 1) {
-			break;	
-		}
+		res = parse_command(command, strlen(command));
+		if (DEBUG) {printf("returned value after parsing: %d\n", res);}
 	}
 	printf("mysh: exiting\n");
 }
