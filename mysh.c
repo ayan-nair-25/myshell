@@ -157,13 +157,81 @@ void print_exit_info(arraylist_t ** args, int arr_len) {
 	printf("\n");
 }
 
+int is_redirect(char * command) {
+	if (strchr(command, '>') != NULL || strchr(command, '<') != NULL) {
+		return 1;	
+	}
+	return 0;
+}
+
+arraylist_t * redirect_inputs(arraylist_t ** args) {
+	arraylist_t * new_args = (arraylist_t *) malloc(sizeof(arraylist_t));
+	al_init(new_args, 1);
+
+	int orig_len = al_length(*args);
+	int redir_mode = -1;
+	int prev_redir = 0;
+
+	for (int i = 0; i < orig_len - 1; i++) {
+		if (prev_redir == 1) {
+			if (redir_mode == 0) {
+				printf("redirecting stdin\n");
+				int fd = open((*args)->data[i], O_RDONLY);
+				if (fd > 0) {
+					printf("attempting dup2\n");
+					dup2(fd, STDIN_FILENO);
+					printf("called dup2 on file |%s|\n", (*args)->data[i]);
+					close(fd);
+					printf("closed fd\n");
+				}
+			}
+			else if (redir_mode == 1) {
+				printf("redirecting stdout\n");
+				int fd = open((*args)->data[i], O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP);
+				if (fd > 0) {
+					printf("attempting dup2\n");
+					dup2(fd, STDOUT_FILENO);
+					printf("called dup2 on file |%s|\n", (*args)->data[i]);
+					close(fd);
+					printf("closed fd\n");
+				}
+			}
+			prev_redir = 0;
+			redir_mode = -1;
+		}
+		else if (strcmp((*args)->data[i], "redir_in") == 0) {
+			prev_redir = 1;	
+			redir_mode = 0;
+		}
+		else if (strcmp((*args)->data[i], "redir_out") == 0) {
+			prev_redir = 1;
+			redir_mode = 1;
+		}
+		else {
+			printf("pushing %s to new arraylist\n", (*args)->data[i]);
+			int orig_length = strlen((*args)->data[i]);
+			printf("string length: %d\n", orig_length);
+			char * arg = malloc(orig_length + 1);
+			memcpy(arg, (*args)->data[i], orig_length);
+			arg[orig_length] = '\0';
+			printf("adding arg %s\n", arg);
+			al_push(new_args, arg);
+			printf("pushed\n");
+		}
+	}
+	al_push(new_args, (char *) NULL);
+	printf("finished execution\n");
+	return new_args;
+}
+
 int parse_command(char * command, int strlen) {
 	if (DEBUG) {printf("currently parsing command %s with length %d\n", command, strlen);}
 	if (strlen == 0) {
 		return 0;	
 	}
 
-	arraylist_t * args = to_arraylist(command, strlen);
+	int redir = is_redirect(command);
+	arraylist_t * args = to_arraylist(command, strlen, redir);
 	int arr_len = al_length(args);
 
 	if (DEBUG) {
@@ -212,7 +280,37 @@ int parse_command(char * command, int strlen) {
 				}
 			}
 
-			if (contains_slash(args->data[0])) {
+			// if command is redirection command
+			if (redir) {
+				if (DEBUG) {printf("redirecting input\n");}
+				if (DEBUG) {printf("current args:\n");}
+				for (int i = 0; i < arr_len; i++) {
+					printf("string: %s\n", (args)->data[i]);
+				}
+				arraylist_t * new_args = redirect_inputs(&args);
+				if (DEBUG) {printf("redefined args. checking...\n");}
+				if (DEBUG) {
+					int new_len = al_length(new_args);
+					for (int i = 0; i < new_len; i++) {
+						printf("string: %s\n", (new_args)->data[i]);
+					}
+				}
+
+				if (DEBUG) {printf("executing command\n");}
+				if (contains_slash((new_args)->data[0])) {
+					if (DEBUG) {printf("in execv if\n");}
+					int res = execv((new_args)->data[0], (new_args)->data);
+					al_destroy(new_args);
+				}
+				// add a check to see if the command is cd, pwd, etc.
+				else {
+					run_bare_name(&new_args);
+					// the 3 dirs that we want to search
+				}
+				al_destroy(new_args);
+
+			}
+			else if (contains_slash(args->data[0])) {
 				execv(args->data[0], args->data);
 			}
 			// add a check to see if the command is cd, pwd, etc.
@@ -222,19 +320,27 @@ int parse_command(char * command, int strlen) {
 			}
 			//exit(0);
 		}
-
 		wait(&status);
+		if (DEBUG) {printf("out of child\n");}
 		
 	}
 
+	if (DEBUG) {printf("current arraylist contents\n");}
+	if (DEBUG) {printf("printing arraylist\n");}
+	if (DEBUG) {
+		for (int i = 0; i < arr_len; i++) {
+			printf("string: %s\n", (args)->data[i]);
+		}
+	}
 	al_destroy(args);
+	if (DEBUG) {printf("destroyed arraylist\n");}
 	return 0;
 }
 
 // 1. given a full word, check if it has a *. if not then do normal stuff
 // 2. use glob.h to get all matching strings with the pattern in the word
 // 3. add all matching strings to arraylist
-arraylist_t * to_arraylist(char * str, int strlen) {
+arraylist_t * to_arraylist(char * str, int strlen, int is_redirect) {
 	// initialize our arraylist
 	arraylist_t * cmd_args = (arraylist_t *) malloc(sizeof(cmd_args));
 	if (DEBUG) {printf("initializing\n");}
@@ -250,8 +356,30 @@ arraylist_t * to_arraylist(char * str, int strlen) {
 		// store current char
 		char curr_char = str[stridx];
 		if (DEBUG) {printf("checking chr\n");}
+		if (DEBUG) {printf("checking char %c\n", curr_char);}
+		if (DEBUG) {printf("strstart: %d stridx %d\n", strstart, stridx);}
+		if (curr_char == '>') {
+			if (is_redirect) {
+				int sizeof_mode = 10;
+				char * fmode = malloc(sizeof_mode);
+				strcpy(fmode, "redir_out");
+				fmode[sizeof_mode - 1] = '\0';
+				al_push(cmd_args, fmode);
+				strstart = stridx + 1;
+			}
+		}
+		else if (curr_char == '<') {
+			if (is_redirect) {
+				int sizeof_mode = 9;
+				char * fmode = malloc(sizeof_mode);
+				strcpy(fmode, "redir_in");
+				fmode[sizeof_mode - 1] = '\0';
+				al_push(cmd_args, fmode);
+				strstart = stridx + 1;
+			}
+		}
 		// if we are at a space or a null term and it's not a newline
-		if (curr_char == ' ' || curr_char == '\0') {
+		else if (curr_char == ' ' || curr_char == '\0') {
 			if (DEBUG) {printf("adding to list\n");}
 			if (DEBUG) {printf("strstart: %d, stridx: %d\n", strstart, stridx);}
 			// check that the start and the idx aren't equal, if this is the case then we
