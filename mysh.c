@@ -99,6 +99,64 @@ int check_if_builtin(char * command) {
 	}
 }
 
+void run_builtin_command(int res, arraylist_t ** args) {
+	int arr_len = al_length(*args);
+	if (res == 1) {
+		if (arr_len != 3) {
+			printf("Error, incorrect number of commands");
+		}
+		//printf("changing dir to %s\n", (*args)->data[1]);
+		int res = chdir((*args)->data[1]);
+		if (res < 0) {
+			printf("Error: %s\n", strerror(errno));
+		}
+	}
+	else if (res == 2) {
+		char curr_dir[PATH_MAX + 1];
+		printf("%s\n", getcwd(curr_dir, sizeof(curr_dir)));
+		fflush(stdout);
+	}
+	else {
+		// implement which		
+		char * cmd_path = check_paths((*args)->data[1]);
+		if (cmd_path != NULL) {
+			printf("%s\n", cmd_path);
+			fflush(stdout);
+		}
+	}
+}
+
+void run_bare_name(arraylist_t ** args) {
+	char * cmd_path = check_paths((*args)->data[0]);
+	if (DEBUG) {printf("executing %s\n", cmd_path);}
+	printf("command found at %s\n", cmd_path);
+	if (cmd_path != NULL) {
+		char * tmp = (*args)->data[0];
+		(*args)->data[0] = cmd_path;
+		execv(cmd_path, (*args)->data);
+		(*args)->data[0] = tmp;
+	}
+	else {
+		printf("Command not found, exiting\n");
+		exit(0);
+	}
+	free(cmd_path);
+}
+
+void print_exit_info(arraylist_t ** args, int arr_len) {
+	for (int i = 1; i < arr_len - 1; i++) {
+		if (i != arr_len - 1) {
+			printf("%s ", (*args)->data[i]);
+			fflush(stdout);
+		}
+		else {
+			printf("%s", (*args)->data[i]);
+			fflush(stdout);
+		}
+	}
+	printf("\n");
+}
+
 int parse_command(char * command, int strlen) {
 	if (DEBUG) {printf("currently parsing command %s with length %d\n", command, strlen);}
 	if (strlen == 0) {
@@ -117,6 +175,8 @@ int parse_command(char * command, int strlen) {
 
 	if (strcmp(args->data[0], "exit") == 0) {
 		if (arr_len > 2) {
+			print_exit_info(&args, arr_len);
+			/*
 			for (int i = 1; i < arr_len - 1; i++) {
 				// only print spaces while we aren't at the last arg
 				if (i != arr_len - 1) {
@@ -130,14 +190,19 @@ int parse_command(char * command, int strlen) {
 				}
 			}
 			printf("\n");
+			*/
 		}
 		printf("current process id %d\n", getpid());
 		if (DEBUG) {printf("returning 1 from parse_command, exiting\n");}
 		return 1;
 	}
 
+	//printf("checking command %s\n", command);
 	if (check_if_builtin(args->data[0]) > 0) {
+		//printf("we are here\n");
 		int res = check_if_builtin(args->data[0]);
+		run_builtin_command(res, &args);
+		/*
 		if (res == 1) {
 			if (arr_len != 3) {
 				printf("Error, incorrect number of commands");
@@ -160,6 +225,7 @@ int parse_command(char * command, int strlen) {
 				fflush(stdout);
 			}
 		}
+		*/
 	}
 	else {
 
@@ -190,7 +256,9 @@ int parse_command(char * command, int strlen) {
 			}
 			// add a check to see if the command is cd, pwd, etc.
 			else {
+				run_bare_name(&args);
 				// the 3 dirs that we want to search
+				/*
 				char * cmd_path = check_paths(args->data[0]);
 				if (DEBUG) {printf("executing %s\n", cmd_path);}
 				printf("command found at %s\n", cmd_path);
@@ -205,6 +273,7 @@ int parse_command(char * command, int strlen) {
 					exit(0);
 				}
 				free(cmd_path);
+				*/
 			}
 			//exit(0);
 		}
@@ -293,6 +362,9 @@ void strip_newlines(arraylist_t ** al) {
 }
 */
 
+// 1. given a full word, check if it has a *. if not then do normal stuff
+// 2. use glob.h to get all matching strings with the pattern in the word
+// 3. add all matching strings to arraylist
 arraylist_t * to_arraylist(char * str, int strlen) {
 	// initialize our arraylist
 	arraylist_t * cmd_args = (arraylist_t *) malloc(sizeof(cmd_args));
@@ -460,8 +532,10 @@ int main(int argc, char ** argv) {
 	char buf;
 	int bytes;
 
+	/*
 	char * ex = "hello   there bro";
 	arraylist_t * out = to_arraylist(ex, 17);
+	*/
 
 	int input_tty = isatty(STDIN_FILENO);
 	int output_tty = isatty(STDOUT_FILENO);
