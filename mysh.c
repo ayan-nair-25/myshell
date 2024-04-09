@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <glob.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -19,6 +20,7 @@
 #define DEBUG 0
 #endif
 
+int exit_status;
 
 // batch mode is 0, interactive mode is 1
 int contains_slash(char * command) {
@@ -103,12 +105,14 @@ void run_builtin_command(int res, arraylist_t ** args) {
 	int arr_len = al_length(*args);
 	if (res == 1) {
 		if (arr_len != 3) {
-			printf("Error, incorrect number of commands");
+			printf("Error, incorrect number of commands\n");
+			exit_status = 1;
 		}
 		//printf("changing dir to %s\n", (*args)->data[1]);
 		int res = chdir((*args)->data[1]);
 		if (res < 0) {
 			printf("Error: %s\n", strerror(errno));
+			exit_status = 1;
 		}
 	}
 	else if (res == 2) {
@@ -118,10 +122,19 @@ void run_builtin_command(int res, arraylist_t ** args) {
 	}
 	else {
 		// implement which		
+		if (check_if_builtin((*args)->data[1]) > 0) {
+			exit_status = 1;
+		}
+		else if (arr_len != 3) {
+			exit_status = 1;
+		}
 		char * cmd_path = check_paths((*args)->data[1]);
 		if (cmd_path != NULL) {
 			printf("%s\n", cmd_path);
 			fflush(stdout);
+		}
+		else {
+			exit_status = 1;
 		}
 	}
 }
@@ -129,7 +142,6 @@ void run_builtin_command(int res, arraylist_t ** args) {
 void run_bare_name(arraylist_t ** args) {
 	char * cmd_path = check_paths((*args)->data[0]);
 	if (DEBUG) {printf("executing %s\n", cmd_path);}
-	printf("command found at %s\n", cmd_path);
 	if (cmd_path != NULL) {
 		char * tmp = (*args)->data[0];
 		(*args)->data[0] = cmd_path;
@@ -138,7 +150,9 @@ void run_bare_name(arraylist_t ** args) {
 	}
 	else {
 		printf("Command not found, exiting\n");
-		exit(0);
+		exit_status = 1;
+		free(cmd_path);
+		exit(exit_status);
 	}
 	free(cmd_path);
 }
@@ -175,25 +189,21 @@ arraylist_t * redirect_inputs(arraylist_t ** args) {
 	for (int i = 0; i < orig_len - 1; i++) {
 		if (prev_redir == 1) {
 			if (redir_mode == 0) {
-				printf("redirecting stdin\n");
 				int fd = open((*args)->data[i], O_RDONLY);
 				if (fd > 0) {
-					printf("attempting dup2\n");
 					dup2(fd, STDIN_FILENO);
-					printf("called dup2 on file |%s|\n", (*args)->data[i]);
 					close(fd);
-					printf("closed fd\n");
 				}
 			}
 			else if (redir_mode == 1) {
-				printf("redirecting stdout\n");
 				int fd = open((*args)->data[i], O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP);
 				if (fd > 0) {
-					printf("attempting dup2\n");
 					dup2(fd, STDOUT_FILENO);
-					printf("called dup2 on file |%s|\n", (*args)->data[i]);
 					close(fd);
-					printf("closed fd\n");
+				}
+				else if (fd == -1) {
+					printf("Unable to open file for reading.\n");
+					exit_status = 1;
 				}
 			}
 			prev_redir = 0;
@@ -208,139 +218,195 @@ arraylist_t * redirect_inputs(arraylist_t ** args) {
 			redir_mode = 1;
 		}
 		else {
-			printf("pushing %s to new arraylist\n", (*args)->data[i]);
 			int orig_length = strlen((*args)->data[i]);
-			printf("string length: %d\n", orig_length);
 			char * arg = malloc(orig_length + 1);
 			memcpy(arg, (*args)->data[i], orig_length);
 			arg[orig_length] = '\0';
-			printf("adding arg %s\n", arg);
 			al_push(new_args, arg);
-			printf("pushed\n");
 		}
 	}
 	al_push(new_args, (char *) NULL);
-	printf("finished execution\n");
 	return new_args;
 }
 
-int parse_command(char * command, int strlen) {
-	if (DEBUG) {printf("currently parsing command %s with length %d\n", command, strlen);}
-	if (strlen == 0) {
+int is_pipe(char * command) {
+	if (strchr(command, '|') != NULL) {
+		return 1;
+	}
+	else {
 		return 0;	
 	}
+}
 
-	int redir = is_redirect(command);
-	arraylist_t * args = to_arraylist(command, strlen, redir);
-	int arr_len = al_length(args);
+arraylist_t * find_first_pipe(arraylist_t ** args) {
+	int arr_len = al_length(*args);
+	arraylist_t * arglist = (arraylist_t *) malloc(sizeof(arraylist_t *));
+	al_init(arglist, 1);
 
-	if (DEBUG) {
-		printf("printing arraylist\n");
-		for (int i = 0; i < arr_len; i++) {
-			printf("string: %s\n", (args)->data[i]);
+	for (int i = 0; i < arr_len; i++) {
+		if (strcmp((*args)->data[i], "pipe") == 0) {
+			al_push(arglist, (char *) NULL);
+			return arglist;
+		}
+		al_push(arglist, (*args)->data[i]);
+	}
+}
+
+arraylist_t * find_second_pipe(arraylist_t ** args) {
+	int arr_len = al_length(*args);
+	arraylist_t * arglist = (arraylist_t *) malloc(sizeof(arraylist_t *));
+	al_init(arglist, 1);
+
+	int append = 0;
+	for (int i = 0; i < arr_len - 1; i++) {
+		if (append == 1) {
+			al_push(arglist, (*args)->data[i]);
+		}
+		if (strcmp((*args)->data[i], "pipe") == 0) {
+			append = 1;	
 		}
 	}
+	al_push(arglist, (char *) NULL);
+	return arglist;
+}
 
-	if (strcmp(args->data[0], "exit") == 0) {
-		if (arr_len > 2) {
-			print_exit_info(&args, arr_len);
+int is_redir_pipe(arraylist_t ** args) {
+	int arr_len = al_length(*args);
+
+	for (int i = 0; i < arr_len - 1; i++) {
+		if (strcmp((*args)->data[i], "redir_in") == 0 || strcmp((*args)->data[i], "redir_out") == 0) {
+			return 1;	
 		}
-		printf("current process id %d\n", getpid());
-		if (DEBUG) {printf("returning 1 from parse_command, exiting\n");}
+	}
+	
+	return 0;
+}
+
+int run_execv(arraylist_t ** args) {
+	// check for exit
+	// then check for builtin
+	int arr_len = al_length(*args);
+	if (strcmp((*args)->data[0], "exit") == 0) {
+		if (arr_len > 2) {
+			print_exit_info(args, arr_len);
+		}
 		return 1;
 	}
 
 	//printf("checking command %s\n", command);
-	if (check_if_builtin(args->data[0]) > 0) {
+	if (check_if_builtin((*args)->data[0]) > 0) {
 		//printf("we are here\n");
-		int res = check_if_builtin(args->data[0]);
-		run_builtin_command(res, &args);
+		int res = check_if_builtin((*args)->data[0]);
+		run_builtin_command(res, args);
 	}
 	else {
-
 		int status;
 		int child_pid;
 		if ((child_pid = fork()) == 0) {
-			printf("in child\n");
-			if (DEBUG) {
-				printf("in child\n");
-				printf("parsing %s\n", args->data[0]);
-				printf("contains a slash: %d\n", contains_slash(args->data[0]));
-				printf("is builtin: %d\n", check_if_builtin(args->data[0]));
-				printf("length of arg list: %d\n", arr_len);
-
-				printf("printing arraylist\n");
-				for (int i = 0; i < arr_len; i++) {
-					printf("string: %s\n", (args)->data[i]);
-				}
-
-				printf("printing arraylist args\n");
-				for (int i = 0; i < arr_len - 1; i++) {
-					printf("string :%s\n", ((args->data) + 1)[i]);
-				}
-			}
-
 			// if command is redirection command
-			if (redir) {
-				if (DEBUG) {printf("redirecting input\n");}
-				if (DEBUG) {printf("current args:\n");}
-				for (int i = 0; i < arr_len; i++) {
-					printf("string: %s\n", (args)->data[i]);
+			if (contains_slash((*args)->data[0])) {
+				int res = execv((*args)->data[0], (*args)->data);
+				if (res == -1) {
+					exit_status = 1;	
 				}
-				arraylist_t * new_args = redirect_inputs(&args);
-				if (DEBUG) {printf("redefined args. checking...\n");}
-				if (DEBUG) {
-					int new_len = al_length(new_args);
-					for (int i = 0; i < new_len; i++) {
-						printf("string: %s\n", (new_args)->data[i]);
-					}
-				}
-
-				if (DEBUG) {printf("executing command\n");}
-				if (contains_slash((new_args)->data[0])) {
-					if (DEBUG) {printf("in execv if\n");}
-					int res = execv((new_args)->data[0], (new_args)->data);
-					al_destroy(new_args);
-				}
-				// add a check to see if the command is cd, pwd, etc.
-				else {
-					run_bare_name(&new_args);
-					// the 3 dirs that we want to search
-				}
-				al_destroy(new_args);
-
-			}
-			else if (contains_slash(args->data[0])) {
-				execv(args->data[0], args->data);
 			}
 			// add a check to see if the command is cd, pwd, etc.
 			else {
-				run_bare_name(&args);
+				run_bare_name(args);
 				// the 3 dirs that we want to search
 			}
-			//exit(0);
+			exit(exit_status);
 		}
-		wait(&status);
-		if (DEBUG) {printf("out of child\n");}
-		
+
+		waitpid(child_pid, &status, 0);
+		if( !WIFEXITED(status) ) {
+			exit_status = 1;	
+		}
+		exit_status = WEXITSTATUS(status);
 	}
 
-	if (DEBUG) {printf("current arraylist contents\n");}
-	if (DEBUG) {printf("printing arraylist\n");}
-	if (DEBUG) {
-		for (int i = 0; i < arr_len; i++) {
-			printf("string: %s\n", (args)->data[i]);
-		}
-	}
-	al_destroy(args);
-	if (DEBUG) {printf("destroyed arraylist\n");}
 	return 0;
+
 }
 
-// 1. given a full word, check if it has a *. if not then do normal stuff
-// 2. use glob.h to get all matching strings with the pattern in the word
-// 3. add all matching strings to arraylist
-arraylist_t * to_arraylist(char * str, int strlen, int is_redirect) {
+int run_redirect(arraylist_t ** args) {
+	int orig_stdout = dup(STDOUT_FILENO);
+	int orig_stdin = dup(STDIN_FILENO);
+	arraylist_t * new_args = redirect_inputs(args);
+	int res = run_execv(&new_args);
+	dup2(orig_stdout, 1);
+	dup2(orig_stdin, 0);
+	al_destroy(new_args);
+	
+	return res;
+}
+
+int run_pipe(arraylist_t ** args, char * command) {
+	
+	arraylist_t * arglist_1 = find_first_pipe(args);
+	arraylist_t * arglist_2 = find_second_pipe(args);
+
+	int p[2];
+	int res = pipe(p);
+	if (res == -1) {
+		printf("Error on pipe\n");
+		exit_status = 1;
+	}
+	int retval;
+
+	int status1;
+	int status2;
+
+	//int child_pid_1 = fork();
+	int child_pid_1;
+	int child_pid_2;
+	if ((child_pid_1 = fork()) == 0) {
+
+		int redir = is_redir_pipe(&arglist_2);
+		int ret;
+
+		// dup2 to set stdout of first process to write end of pipe
+		// if command is redirection command
+		dup2(p[0], STDIN_FILENO);
+		close(p[1]);
+		if (redir) {
+			ret = run_redirect(&arglist_2);
+		}
+		else {
+			ret = run_execv(&arglist_2);
+		}
+		exit(ret);
+	}
+	if ((child_pid_2 = fork()) == 0) {
+		int ret;
+		int redir = is_redir_pipe(&arglist_1);
+
+		dup2(p[1], STDOUT_FILENO);
+		close(p[0]);
+		if (redir) {
+			ret = run_redirect(&arglist_1);
+		}
+		else {
+			ret = run_execv(&arglist_1);
+		}
+		exit(ret);
+	}
+	close(p[0]);
+	close(p[1]);
+
+	waitpid(child_pid_1, &status1, 0);
+	if( !WIFEXITED(status1) ) {
+		exit_status = 1;	
+		printf("exit status: %d\n", exit_status);
+	}
+	retval = WEXITSTATUS(status1);
+	wait(&status2);
+
+	return retval;
+}
+
+
+arraylist_t * to_arraylist(char * str, int strlen) {
 	// initialize our arraylist
 	arraylist_t * cmd_args = (arraylist_t *) malloc(sizeof(cmd_args));
 	if (DEBUG) {printf("initializing\n");}
@@ -356,30 +422,8 @@ arraylist_t * to_arraylist(char * str, int strlen, int is_redirect) {
 		// store current char
 		char curr_char = str[stridx];
 		if (DEBUG) {printf("checking chr\n");}
-		if (DEBUG) {printf("checking char %c\n", curr_char);}
-		if (DEBUG) {printf("strstart: %d stridx %d\n", strstart, stridx);}
-		if (curr_char == '>') {
-			if (is_redirect) {
-				int sizeof_mode = 10;
-				char * fmode = malloc(sizeof_mode);
-				strcpy(fmode, "redir_out");
-				fmode[sizeof_mode - 1] = '\0';
-				al_push(cmd_args, fmode);
-				strstart = stridx + 1;
-			}
-		}
-		else if (curr_char == '<') {
-			if (is_redirect) {
-				int sizeof_mode = 9;
-				char * fmode = malloc(sizeof_mode);
-				strcpy(fmode, "redir_in");
-				fmode[sizeof_mode - 1] = '\0';
-				al_push(cmd_args, fmode);
-				strstart = stridx + 1;
-			}
-		}
 		// if we are at a space or a null term and it's not a newline
-		else if (curr_char == ' ' || curr_char == '\0') {
+		if (curr_char == ' ' || curr_char == '\0'|| curr_char == '<'|| curr_char == '>'|| curr_char == '|') {
 			if (DEBUG) {printf("adding to list\n");}
 			if (DEBUG) {printf("strstart: %d, stridx: %d\n", strstart, stridx);}
 			// check that the start and the idx aren't equal, if this is the case then we
@@ -399,6 +443,26 @@ arraylist_t * to_arraylist(char * str, int strlen, int is_redirect) {
 					printf("pushed %s\n", (cmd_args)->data[length - 1]);
 				}
 			}
+			if(curr_char == '<'){
+				char * str1 = malloc(9);
+				strcpy(str1, "redir_in");
+				str1[8] = '\0';
+				al_push(cmd_args, str1);
+			}
+			if(curr_char == '>'){
+				char * str1 = malloc(10);
+				strcpy(str1, "redir_out");
+				str1[9] = '\0';
+				al_push(cmd_args, str1);
+			}
+			if(curr_char == '|'){
+				char * str1 = malloc(5);
+				strcpy(str1, "pipe");
+				str1[4] = '\0';
+				al_push(cmd_args, str1);
+			}
+			
+			
 			// get the new start of our string
 			strstart = stridx + 1;
 		}
@@ -419,6 +483,134 @@ arraylist_t * to_arraylist(char * str, int strlen, int is_redirect) {
 	return cmd_args;
 }
 
+arraylist_t * detect_wildcard(arraylist_t * tokens){
+	char newpath[PATH_MAX+1];
+	arraylist_t * expanded_tokens = (arraylist_t *) malloc(sizeof(expanded_tokens));
+	al_init(expanded_tokens, 5);
+	glob_t globlist;
+	int match = 0;
+	for(int i = 0; i < al_length(tokens) - 1; i++){
+		for(int j = 0; j < strlen(tokens->data[i]); j++){
+			if(tokens->data[i][j] == '*'){
+				match = 1;
+				glob(tokens->data[i], GLOB_NOCHECK, NULL, &globlist);
+				int k = 0;
+				while (globlist.gl_pathv[k]){
+					al_push(expanded_tokens, globlist.gl_pathv[k]);
+          				k++;
+				}
+
+			}
+
+		}
+		if(match == 0){
+			al_push(expanded_tokens, tokens->data[i]);
+		}
+		else{
+			match = 0;
+		}
+
+	}
+	al_push(expanded_tokens, (char *) NULL);
+	return expanded_tokens;
+}
+
+int is_conditional(arraylist_t ** args) {
+	if (strcmp((*args)->data[0], "then") == 0 ) {
+		return 1;	
+	}
+	else if (strcmp((*args)->data[0], "else") == 0) {
+		return 2;	
+	}
+	else {
+		return 0;
+	}
+}
+
+arraylist_t * omit_condition(arraylist_t ** args) {
+	arraylist_t * new_args = (arraylist_t *) malloc(sizeof(arraylist_t *));
+	al_init(new_args, 1);
+	int arr_len = al_length(*args);
+
+	for (int i = 1; i < arr_len - 1; i++) {
+		al_push(new_args, (*args)->data[i]);
+	}
+	al_push(new_args, (char *) NULL);
+	return new_args;
+}
+
+int run_conditional(arraylist_t ** args, char * command) {
+	int condition_type = is_conditional(args);
+	arraylist_t * new_args = omit_condition(args);
+
+	int outval;
+	int redir = is_redirect(command);
+	int pipe = is_pipe(command);
+
+	if (condition_type == 1 && exit_status == 0) {
+		if (pipe) {
+			outval = run_pipe(&new_args, command);
+		}
+		else if (redir) {
+			outval = run_redirect(&new_args);
+		}
+		else {
+			outval = run_execv(&new_args);
+		}
+	}
+	else if (condition_type == 0 && exit_status == 1) {
+		if (pipe) {
+			outval = run_pipe(&new_args, command);
+		}
+		else if (redir) {
+			outval = run_redirect(&new_args);
+		}
+		else {
+			outval = run_execv(&new_args);
+		}
+	}
+
+	return outval;
+
+}
+
+int parse_command(char * command, int strlen) {
+	if (DEBUG) {printf("currently parsing command %s with length %d\n", command, strlen);}
+	if (strlen == 0) {
+		return 0;	
+	}
+
+	int redir = is_redirect(command);
+	int pipe = is_pipe(command);
+	arraylist_t * args = detect_wildcard(to_arraylist(command, strlen));
+	int arr_len = al_length(args);
+	int conditional = is_conditional(&args);
+	/*
+	for (int i = 0; i < arr_len - 1; i++) {
+		printf("%s\n", (args)->data[i])	;
+	}
+	*/
+
+	int outval;
+
+	if (conditional > 0) {
+		outval = run_conditional(&args, command);
+	}
+	else if (pipe) {
+		outval = run_pipe(&args, command);
+	}
+	else if (redir) {
+		outval = run_redirect(&args);
+	}
+	else {
+		outval = run_execv(&args);
+	}
+	return outval;
+}
+
+// 1. given a full word, check if it has a *. if not then do normal stuff
+// 2. use glob.h to get all matching strings with the pattern in the word
+// 3. add all matching strings to arraylist
 char * read_input(int fd, int mode) {
 	
 	int buflength = BUF_SIZE;
@@ -450,6 +642,7 @@ char * read_input(int fd, int mode) {
 				// buf + linestart gives the beginning of the start of the line
 
 				if (mode == 1) {
+					exit_status = 0;
 					/*
 					int res = parse_command(buf + linestart, pos - linestart);
 					if (DEBUG) {printf("strlen: %d\n", pos - linestart);}
@@ -460,7 +653,9 @@ char * read_input(int fd, int mode) {
 					return (buf + linestart);
 				}
 				else {
+					exit_status = 0;
 					// parse the command for batch mode	
+					parse_command(buf + linestart, strlen(buf + linestart));
 				}
 				//printf("%d chars: |%s|\n", pos - linestart, buf + linestart);
 
@@ -496,10 +691,15 @@ char * read_input(int fd, int mode) {
 	}
 }
 
-
-
-void run_batch_mode() {
-	return;
+void run_batch_mode(char * path, int batch_type) {
+	if (batch_type == 0) {
+		read_input(STDIN_FILENO, 0);
+	}
+	else {
+		int fd = open(path, O_RDONLY);
+		dup2(fd, STDIN_FILENO);
+		read_input(STDIN_FILENO, 0);
+	}
 }
 
 // have a loop that runs and prints myshell
@@ -526,27 +726,21 @@ void run_interactive_mode() {
 
 
 int main(int argc, char ** argv) {
-	char buf;
-	int bytes;
-
-	/*
-	char * ex = "hello   there bro";
-	arraylist_t * out = to_arraylist(ex, 17);
-	*/
-
 	int input_tty = isatty(STDIN_FILENO);
 	int output_tty = isatty(STDOUT_FILENO);
 	if (argc == 2) {
 		if (DEBUG) {
 			printf("Found file in cmd args. Running batch mode.\n");
 		}
-		run_batch_mode();
+		int batch_type = 1;
+		run_batch_mode(argv[1], batch_type);
 	}
 	else if (input_tty == 0 && output_tty == 1) {
 		if (DEBUG) {
 			printf("Found piped input. Running batch mode.\n");
 		}
-		run_batch_mode();
+		int batch_type = 0;
+		run_batch_mode(STDIN_FILENO, batch_type);
 	}
 	else if (input_tty == 1 && output_tty == 1) {
 		if (DEBUG) {

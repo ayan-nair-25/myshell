@@ -15,9 +15,13 @@ void al_init(arraylist_t * L, unsigned size) {;
 // deallocate all of our memory here
 void al_destroy(arraylist_t * L) {
 	for (int i = 0; i < L->length; i++) {
-		free(L->data[i]);
+		if (L->data[i] != NULL) {
+			free(L->data[i]);
+		}
 	}
-	free(L->data);	
+	if (L->data != NULL) {
+		free(L->data);	
+	}
 }	
 
 unsigned al_length(arraylist_t * L) {
